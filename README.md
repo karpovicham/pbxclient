@@ -1,9 +1,9 @@
 pbxclient - Private Branch Exchange client
 ======
 
-#pbxclient
+## pbxclient
 - connects to nats servers
 - makes pbx out calls
 
-#pbxclient-demo
+## pbxclient-demo
 Demo for pbxclient package
