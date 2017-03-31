@@ -5,13 +5,13 @@ import (
 	"context"
 	"fmt"
 	"github.com/infinitytracking/icc-go/pbxclient"
+	"github.com/nats-io/go-nats"
 	"log"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
 	"time"
-	"github.com/nats-io/go-nats"
 )
 
 const callTimeout = 6 * time.Second
