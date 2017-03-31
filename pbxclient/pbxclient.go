@@ -1,4 +1,4 @@
-//pbxclient connects to one of the the nats servers and makes out calls
+//Package pbxclient connects to one of the the nats servers and makes out calls
 package pbxclient
 
 import (
@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-//pbxclient connects to one of the the nats server
+//Client stores nats conn and its config
 type Client struct {
 	config *ClientConfig
 	nc     *nats.Conn
@@ -21,8 +21,8 @@ type Client struct {
 //Servers: "tls://nats.demo.io:4443"
 //RootCAs: "./conf/certs/ca.pem"
 type ClientConfig struct {
-	Servers string
-	RootCAs string
+	Servers  string
+	RootCAs  string
 }
 
 //OutCall has necessary data to make a request
@@ -49,6 +49,7 @@ func NewClient(config *ClientConfig) (*Client, error) {
 	if err := client.setUpNatsConn(); err != nil {
 		return nil, err
 	}
+	defer client.nc.Close()
 
 	return client, nil
 }

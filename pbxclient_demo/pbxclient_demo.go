@@ -5,13 +5,13 @@ import (
 	"context"
 	"fmt"
 	"github.com/infinitytracking/icc-go/pbxclient"
-	"github.com/nats-io/go-nats"
 	"log"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
 	"time"
+	"github.com/nats-io/go-nats"
 )
 
 const callTimeout = 6 * time.Second
@@ -101,7 +101,7 @@ func (nd numberData) processNumber(ctx context.Context, client *pbxclient.Client
 			return
 		case pbxCallResp := <-respCh:
 			//do something with pbxCallResp
-			nd.logInfo("Success, repsonse status: ", pbxCallResp.ResponseStatus)
+			nd.logInfo("Success, response status: ", pbxCallResp.ResponseStatus)
 			return
 		}
 	}
