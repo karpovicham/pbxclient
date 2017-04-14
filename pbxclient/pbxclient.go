@@ -1,38 +1,52 @@
-//Package pbxclient connects to one of the the nats servers and makes out calls
+//pbxclient package connects to one of the the nats servers and makes out calls
 package pbxclient
 
 import (
 	"errors"
-	"fmt"
 	"github.com/nats-io/go-nats"
-	"log"
+	"strings"
 	"time"
 )
 
-//Client stores nats conn and its config
-type Client struct {
-	config *ClientConfig
-	nc     *nats.Conn
+//ClientConfig is config for PBX Client
+//Servers are divided by comma, example: "nats://localhost:1222,nats://localhost:1223,nats://localhost:1224"
+//provide self-signed certs if you use secure connection, example:
+//Servers: "tls://nats.demo.io:4443"
+//RootCAs: "conf/certs/ca.pem,conf/certs/ca2.pem"
+type ClientConfig struct {
+	Servers string
+	RootCAs string
 }
 
-//ClientConfig is a config to set up nats connection
-//servers are divided by comma example "nats://localhost:1222,nats://localhost:1223,nats://localhost:1224"
-//set RootCAs if you use secure connection, for example:
-//Servers: "tls://nats.demo.io:4443"
-//RootCAs: "./conf/certs/ca.pem"
-type ClientConfig struct {
-	Servers  string
-	RootCAs  string
+//Client stores NATS encoded conn and allows to make out call
+type Client struct {
+	nec natsEncodedConnector
+}
+
+type natsEncodedConn struct {
+	*nats.EncodedConn
+}
+
+//natsEncodedConnector interface makes it possible to mock NATS encoded connection
+type natsEncodedConnector interface {
+	IsConnected() bool
+	Close()
+	Publish(subject string, v interface{}) error
+	Request(subject string, v interface{}, vPtr interface{}, timeout time.Duration) error
+	Subscribe(subject string, cb nats.Handler) (*nats.Subscription, error)
 }
 
 //OutCall has necessary data to make a request
 type OutCall struct {
-	CallerId    int
-	CarrierId   int
-	PhoneNumber string
-	Igrp        int
-	Endpoint    string
-	PbxHost     string
+	CallTimeout      int    `json:"callTimeout"`
+	CarrierID        int    `json:"carrierId"`
+	Cmd              string `json:"cmd"`
+	DestPhoneNumber  string `json:"destPhoneNumber"`
+	Endpoint         string `json:"endpoint"`
+	IGRP             int    `json:"igrp"`
+	PBXClientTimeout int    `json:"pbxClientTimeout"`
+	PBXHost          string `json:"pbxHost"`
+	SrcPhoneNumber   string `json:"srcPhoneNumber"`
 }
 
 //OutCallResponse has out call response data
@@ -41,76 +55,88 @@ type OutCallResponse struct {
 	ResponseData   map[string]string
 }
 
-//NewClient returns pbxclient with set up connection
-func NewClient(config *ClientConfig) (*Client, error) {
-	client := &Client{config: config}
+var ErrConn = errors.New("Not connected")
 
-	//Try to connect to the nats server using configs
-	if err := client.setUpNatsConn(); err != nil {
-		return nil, err
-	}
-	defer client.nc.Close()
-
-	return client, nil
-}
-
-//setUpNatsConn check what connection we should do depending on provided configs and sets up connection
-func (c *Client) setUpNatsConn() (err error) {
-	//TODO: set up default options
-	options := []nats.Option{}
-
-	//Use secure connection if we have a CA
-	if c.config.RootCAs != "" {
-		options = append(options, nats.RootCAs(c.config.RootCAs))
+//NewClient returns PBX Client with an opened NATS encoded connection
+func NewClient(conf *ClientConfig) (*Client, error) {
+	//Use secure connection if RootCAs (self-signed certs) are provided
+	var options []nats.Option
+	if conf.RootCAs != "" {
+		rootCAsSlice := strings.Split(conf.RootCAs, ",")
+		options = append(options, nats.RootCAs(rootCAsSlice...))
 	}
 
-	//Connect to the nats server and store opened connection in the client
-	c.nc, err = nats.Connect(c.config.Servers, options...)
+	client := &Client{}
+
+	//Set up connection
+	nc, err := nats.Connect(conf.Servers, options...)
 	if err != nil {
-		return err
+		return client, err
 	}
 
-	return nil
-}
-
-//ensureConn checks if connection is active, if not - try to reconnect
-//looks like nats api has its own reconn feature, we will test it once nats server is set up and available for testing
-func (c *Client) ensureConn() error {
-	if !c.nc.IsConnected() {
-		//TODO: Reconnect
-		return nil
+	//Make sure we can connect to NATS server
+	if !nc.IsConnected() {
+		return client, ErrConn
 	}
 
-	return errors.New("Could not set up connection")
+	//Get JSON encoded connection
+	nec, err := nats.NewEncodedConn(nc, nats.JSON_ENCODER)
+	if err != nil {
+		return client, err
+	}
+
+	client.nec = &natsEncodedConn{nec}
+	return client, nil
 }
 
 //MakeOutCall sends a message via nats to the PBX server and wait for response
 func (c *Client) MakeOutCall(oc *OutCall) (*OutCallResponse, error) {
-	c.logInfo("Started making a call")
-	defer c.logInfo("Finished making a call")
+	ocResp := &OutCallResponse{}
 
-	//Ensure connection is opened
-	if err := c.ensureConn(); err != nil {
-		return nil, err
+	//Make sure NATS server is connected
+	if !c.IsConnected() {
+		return nil, ErrConn
 	}
 
-	//TODO: replace sleep with making actual NATS call
-	time.Sleep(5 * time.Second)
-
-	ocResp := &OutCallResponse{
-		ResponseStatus: 200,
-		ResponseData:   map[string]string{"dtmfReturned": "123456789"},
+	//Perform a Request(subject, req data, resp data, timeout) call with the Inbox reply for the data.
+	//A response will be decoded into the vPtrResponse.
+	if err := c.nec.Request(oc.PBXHost, oc, ocResp, time.Duration(oc.PBXClientTimeout)*time.Second); err != nil {
+		return nil, err
 	}
 
 	return ocResp, nil
 }
 
-//logInfo logs info message
-func (c *Client) logInfo(a ...interface{}) {
-	log.Print("pbxclient: servers:", c.config.Servers, ", Info: ", fmt.Sprint(a...))
+//Close func closes client nats connection
+func (c *Client) Close() {
+	if c.nec != nil {
+		c.nec.Close()
+	}
 }
 
-//logInfo logs error message
-func (c *Client) logError(a ...interface{}) {
-	log.Print("pbxclient: servers:", c.config.Servers, ", Error: ", fmt.Sprint(a...))
+//IsConnected func checks if NATS server is connected, note that client can be set without NATS connection
+func (c *Client) IsConnected() bool {
+	if c.nec != nil {
+		return c.nec.IsConnected()
+	}
+
+	return false
+}
+
+//IsConnected func expand nats.EncodedConn to matches natsEncodedConnector interface
+func (nec *natsEncodedConn) IsConnected() bool {
+	return nec.Conn.IsConnected()
+}
+
+//Request func expand nats.EncodedConn to check also if Connection is Opened
+func (nec *natsEncodedConn) Request(subject string, v interface{}, vPtr interface{}, timeout time.Duration) error {
+	if nec == nil || !nec.Conn.IsConnected() {
+		return ErrConn
+	}
+
+	if err := nec.EncodedConn.Request(subject, v, vPtr, timeout); err != nil {
+		return err
+	}
+
+	return nil
 }

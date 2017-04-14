@@ -5,20 +5,18 @@ import (
 	"context"
 	"fmt"
 	"github.com/infinitytracking/icc-go/pbxclient"
+	"github.com/nats-io/go-nats"
 	"log"
+	"log/syslog"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
-	"time"
-	"github.com/nats-io/go-nats"
 )
-
-const callTimeout = 6 * time.Second
 
 type numberData struct {
 	phoneNumber string
-	callerId    int
+	callerId    string
 	carrierId   int
 	igrp        int
 	endpoint    string
@@ -28,38 +26,68 @@ type numberData struct {
 var wg sync.WaitGroup
 
 var numbersData = []numberData{
-	{phoneNumber: "11111", callerId: 1, carrierId: 1, igrp: 1, endpoint: "demo", pbxHost: "demo"},
-	{phoneNumber: "11112", callerId: 1, carrierId: 1, igrp: 1, endpoint: "demo", pbxHost: "demo"},
-	{phoneNumber: "11113", callerId: 1, carrierId: 1, igrp: 1, endpoint: "demo", pbxHost: "demo"},
+	{phoneNumber: "11111", callerId: "+1234", carrierId: 1, igrp: 1, endpoint: "demo", pbxHost: "demo"},
+	{phoneNumber: "11112", callerId: "+1234", carrierId: 1, igrp: 1, endpoint: "demo", pbxHost: "demo"},
+	{phoneNumber: "11113", callerId: "+1234", carrierId: 1, igrp: 1, endpoint: "demo", pbxHost: "demo"},
 }
 
+const appName = "PBX client demo app"
+
 func main() {
-	log.Print("Started demo application")
+	setUpSyslog(appName)
+	log.Print("Started ", appName)
+	defer log.Print("Finished ", appName)
 
 	//Setup context for cancelling
 	ctx, cancel := context.WithCancel(context.Background())
 	go signalHandler(cancel)
 
-	config := &pbxclient.ClientConfig{
-		Servers: nats.DefaultURL,
-	}
-
-	client, err := pbxclient.NewClient(config)
+	pbxClient, err := pbxclient.NewClient(&pbxclient.ClientConfig{Servers: nats.DefaultURL})
 	if err != nil {
-		log.Print("Error setting up pbxclient")
+		log.Print("Error initialising pbxclient", err)
 		return
 	}
+	defer pbxClient.Close()
 
 	//Create a separate process for each number
-	//Use wg sync to control gourutines for Demo application (it's simpler and less code)
+	//Use wg sync to control goroutines for Demo application (it's simpler and less code)
 	for _, numberData := range numbersData {
 		wg.Add(1)
-		go numberData.processNumber(ctx, client)
+		go numberData.processNumber(ctx, pbxClient)
 	}
 
 	log.Print("Waiting for all processes to be finished")
 	wg.Wait()
-	log.Print("Done! Close application")
+}
+
+//setUpSyslog sets up syslog with a application name
+func setUpSyslog(tag string) {
+	log.SetFlags(0)
+	syslogWriter, err := syslog.New(syslog.LOG_INFO, tag)
+	if err == nil {
+		log.SetOutput(syslogWriter)
+	}
+}
+
+//logInfo prints info message
+func (nd numberData) logInfo(a ...interface{}) {
+	log.Print("Phone number ", nd.phoneNumber, ", Info: ", fmt.Sprint(a...))
+}
+
+//logError prints error message
+func (nd numberData) logError(a ...interface{}) {
+	log.Print("Error: Phone number ", nd.phoneNumber, ", Error: ", fmt.Sprint(a...))
+}
+
+//signalHandler function responds to SIGUP, SIGTERM signals to cleanly shutdown worker using context
+func signalHandler(cancel context.CancelFunc) {
+	sigc := make(chan os.Signal, 1)
+	signal.Notify(sigc, syscall.SIGHUP, syscall.SIGTERM, syscall.SIGINT)
+	for {
+		<-sigc
+		log.Print("Got signal, cancelling context")
+		cancel()
+	}
 }
 
 //Process one number, use pbx client to make a call and wait for the call response
@@ -70,56 +98,19 @@ func (nd numberData) processNumber(ctx context.Context, client *pbxclient.Client
 	defer nd.logInfo("Process finished")
 
 	oc := &pbxclient.OutCall{
-		CallerId:    nd.callerId,
-		CarrierId:   nd.carrierId,
-		PhoneNumber: nd.phoneNumber,
-		Igrp:        nd.igrp,
-		Endpoint:    nd.endpoint,
-		PbxHost:     nd.pbxHost,
+		DestPhoneNumber: nd.phoneNumber,
+		CarrierID:       nd.carrierId,
+		IGRP:            nd.igrp,
+		Endpoint:        nd.endpoint,
+		PBXHost:         nd.pbxHost,
+		SrcPhoneNumber:  nd.callerId,
 	}
 
-	respCh := make(chan *pbxclient.OutCallResponse)
-	//TODO: use context or channel to close this func if we got timeout error
-	go func() {
-		ocResp, err := client.MakeOutCall(oc)
-		if err != nil {
-			nd.logError(err)
-			return
-		}
-
-		respCh <- ocResp
-	}()
-
-	//Wait for call response
-	//Exit in case if we have timeout error or the process is stopped by signal
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(callTimeout):
-			nd.logError("Got timeout, exit process")
-			return
-		case pbxCallResp := <-respCh:
-			//do something with pbxCallResp
-			nd.logInfo("Success, response status: ", pbxCallResp.ResponseStatus)
-			return
-		}
+	ocResp, err := client.MakeOutCall(oc)
+	if err != nil {
+		nd.logError("Making out call: ", err)
 	}
-}
 
-func (nd numberData) logInfo(a ...interface{}) {
-	log.Print("Demo: Phone number ", nd.phoneNumber, ", Info: ", fmt.Sprint(a...))
-}
-func (nd numberData) logError(a ...interface{}) {
-	log.Print("Demo: Phone number ", nd.phoneNumber, ", Error: ", fmt.Sprint(a...))
-}
-
-func signalHandler(cancel context.CancelFunc) {
-	sigc := make(chan os.Signal, 1)
-	signal.Notify(sigc, syscall.SIGHUP, syscall.SIGTERM, syscall.SIGINT)
-	for {
-		<-sigc
-		log.Print("Got signal, cancelling context")
-		cancel()
-	}
+	nd.logInfo("Success, response status: ", ocResp.ResponseStatus)
+	return
 }
